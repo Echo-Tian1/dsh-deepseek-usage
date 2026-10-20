@@ -1,0 +1,3 @@
+- insert:
+    - id: deepseek-usage
+      name: '@local/deepseek-usage'

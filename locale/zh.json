@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DeepSeek 余额与用量",
+    "description": "在窗口右下角常驻显示 DeepSeek 账户余额、今日花费与今日 token 用量。"
+  }
+}
