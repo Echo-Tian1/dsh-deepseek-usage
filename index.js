@@ -69,6 +69,7 @@ export function apply(ctx, config) {
   let flushing = null
   let disposed = false
   let clientHits = 0
+  let clientBuild = null
 
   function markDirty() {
     dirty = true
@@ -105,6 +106,7 @@ export function apply(ctx, config) {
       error: state.balanceError ?? state.trackError,
       updatedAt: new Date().toISOString(),
       clientHits,
+      clientBuild,
     }
   }
 
@@ -288,8 +290,14 @@ export function apply(ctx, config) {
     ctx.webServer.register({
       kind: 'exact',
       path: `${ROUTE_BASE}/state`,
-      handler: (_req, res) => {
+      handler: (req, res) => {
         clientHits += 1
+        try {
+          const build = new URL(req.url ?? '/', 'http://localhost').searchParams.get('c')
+          if (build) clientBuild = build
+        } catch {
+          // A malformed request URL only loses the build marker.
+        }
         respond(res, { ok: true, ...snapshot() })
       },
     }),

@@ -1,8 +1,13 @@
 /**
- * Client half: a resident status pill in the frame-wide overlay, bottom right.
+ * Client half: a resident, draggable status pill in the frame-wide overlay.
  *
  * It is deliberately self-contained plain JavaScript — no JSX, no imports —
  * and talks to its own Host half over one read-only JSON route.
+ *
+ * Interaction:
+ *  - click / Enter / Space toggles the detail rows;
+ *  - drag moves the card; the position survives reloads (localStorage);
+ *  - the card is clamped inside the viewport on resize and on expand.
  */
 window.__ModuleLoader__.load({
   id: '@local/deepseek-usage',
@@ -11,9 +16,13 @@ window.__ModuleLoader__.load({
     const h = React.createElement
 
     const NS = 'deepseek-usage'
-    const STATE_URL = '/dsh-deepseek-usage/state'
-    const REFRESH_URL = '/dsh-deepseek-usage/refresh'
+    // The query marker lets the Host report which Client build the page runs.
+    const CLIENT_BUILD = '3'
+    const STATE_URL = '/dsh-deepseek-usage/state?c=' + CLIENT_BUILD
+    const REFRESH_URL = '/dsh-deepseek-usage/refresh?c=' + CLIENT_BUILD
     const CLIENT_POLL_MS = 5000
+    const STORAGE_KEY = 'dsh.deepseek-usage.position'
+    const EDGE = 8
 
     const DICTS = {
       zh: {
@@ -37,7 +46,7 @@ window.__ModuleLoader__.load({
         unavailable: '账户余额不可用',
         expand: '展开明细',
         collapse: '收起明细',
-        detailHint: '点击展开明细',
+        dragHint: '拖动可移位，点击看明细',
       },
       en: {
         balance: 'Balance',
@@ -60,12 +69,12 @@ window.__ModuleLoader__.load({
         unavailable: 'Balance unavailable',
         expand: 'Show details',
         collapse: 'Hide details',
-        detailHint: 'Click for details',
+        dragHint: 'Drag to move, click for details',
       },
     }
 
     const CSS = `
-.dsu-root{position:fixed;right:16px;bottom:16px;z-index:2147483000;pointer-events:none}
+.dsu-root{position:fixed;right:16px;bottom:104px;z-index:2147483000;pointer-events:none}
 .dsu-card{pointer-events:auto;display:flex;flex-direction:column;gap:4px;box-sizing:border-box;
   padding:8px 11px;min-width:196px;border-radius:12px;
   background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-1,#fff));
@@ -74,7 +83,8 @@ window.__ModuleLoader__.load({
   color:var(--dsw-alias-label-primary,#1a1a1a);
   font-family:inherit;font-size:12px;line-height:1.35;
   -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);
-  cursor:pointer;user-select:none;outline:none}
+  cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;outline:none}
+.dsu-card.dsu-dragging{cursor:grabbing;box-shadow:0 14px 34px rgba(0,0,0,.22)}
 .dsu-card:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-brand-primary,#4d6bfe),0 8px 26px rgba(0,0,0,.14)}
 .dsu-row{display:flex;align-items:baseline;gap:6px;white-space:nowrap}
 .dsu-amount{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:.2px}
@@ -132,117 +142,240 @@ window.__ModuleLoader__.load({
 
     function createCard(context) {
       return function UsageCard() {
-      const locale = React.useSyncExternalStore(
-        (listener) => context.locale.subscribe(listener),
-        () => context.locale.getSnapshot(),
-      )
-      const t = React.useMemo(() => context.locale.bind(NS), [])
-      const [data, setData] = React.useState(null)
-      const [failed, setFailed] = React.useState(false)
-      const [open, setOpen] = React.useState(false)
-      const [refreshing, setRefreshing] = React.useState(false)
+        const locale = React.useSyncExternalStore(
+          (listener) => context.locale.subscribe(listener),
+          () => context.locale.getSnapshot(),
+        )
+        const t = React.useMemo(() => context.locale.bind(NS), [])
+        const [data, setData] = React.useState(null)
+        const [failed, setFailed] = React.useState(false)
+        const [open, setOpen] = React.useState(false)
+        const [refreshing, setRefreshing] = React.useState(false)
+        const [pos, setPos] = React.useState(null)
+        const [dragging, setDragging] = React.useState(false)
 
-      React.useEffect(() => {
-        let alive = true
-        let timer = null
+        const cardRef = React.useRef(null)
+        const dragState = React.useRef(null)
 
-        const load = async () => {
+        const clamp = React.useCallback((left, top) => {
+          const el = cardRef.current
+          const width = el ? el.offsetWidth : 210
+          const height = el ? el.offsetHeight : 40
+          const maxLeft = Math.max(EDGE, window.innerWidth - width - EDGE)
+          const maxTop = Math.max(EDGE, window.innerHeight - height - EDGE)
+          return {
+            left: Math.min(Math.max(EDGE, left), maxLeft),
+            top: Math.min(Math.max(EDGE, top), maxTop),
+          }
+        }, [])
+
+        const clampInPlace = React.useCallback(() => {
+          setPos((current) => {
+            if (!current) return current
+            const next = clamp(current.left, current.top)
+            return next.left === current.left && next.top === current.top ? current : next
+          })
+        }, [clamp])
+
+        React.useEffect(() => {
           try {
-            const response = await fetch(STATE_URL, { cache: 'no-store', credentials: 'same-origin' })
+            const raw = window.localStorage.getItem(STORAGE_KEY)
+            if (!raw) return
+            const saved = JSON.parse(raw)
+            if (Number.isFinite(saved?.left) && Number.isFinite(saved?.top)) {
+              setPos(clamp(saved.left, saved.top))
+            }
+          } catch {
+            // A blocked or malformed store simply falls back to the default corner.
+          }
+        }, [clamp])
+
+        React.useEffect(() => {
+          window.addEventListener('resize', clampInPlace)
+          return () => window.removeEventListener('resize', clampInPlace)
+        }, [clampInPlace])
+
+        // Expanding grows downward from a dragged position; keep it on screen.
+        React.useLayoutEffect(() => {
+          clampInPlace()
+        }, [open, clampInPlace])
+
+        React.useEffect(() => {
+          let alive = true
+          let timer = null
+
+          const load = async () => {
+            try {
+              const response = await fetch(STATE_URL, { cache: 'no-store', credentials: 'same-origin' })
+              if (!response.ok) throw new Error('http ' + response.status)
+              const payload = await response.json()
+              if (!alive) return
+              setData(payload)
+              setFailed(false)
+            } catch {
+              if (alive) setFailed(true)
+            }
+          }
+
+          void load()
+          timer = setInterval(load, CLIENT_POLL_MS)
+          return () => {
+            alive = false
+            if (timer) clearInterval(timer)
+          }
+        }, [])
+
+        const refresh = React.useCallback(async () => {
+          setRefreshing(true)
+          try {
+            const response = await fetch(REFRESH_URL, { cache: 'no-store', credentials: 'same-origin' })
             if (!response.ok) throw new Error('http ' + response.status)
             const payload = await response.json()
-            if (!alive) return
             setData(payload)
             setFailed(false)
           } catch {
-            if (alive) setFailed(true)
+            setFailed(true)
+          } finally {
+            setRefreshing(false)
+          }
+        }, [])
+
+        const onPointerDown = (event) => {
+          if (event.pointerType === 'mouse' && event.button !== 0) return
+          const el = cardRef.current
+          if (!el) return
+          const rect = el.getBoundingClientRect()
+          dragState.current = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            originLeft: rect.left,
+            originTop: rect.top,
+            moved: false,
+          }
+          try {
+            event.currentTarget.setPointerCapture(event.pointerId)
+          } catch {
+            // Pointer capture is best-effort; the handlers still receive moves.
           }
         }
 
-        void load()
-        timer = setInterval(load, CLIENT_POLL_MS)
-        return () => {
-          alive = false
-          if (timer) clearInterval(timer)
+        const onPointerMove = (event) => {
+          const drag = dragState.current
+          if (!drag || drag.pointerId !== event.pointerId) return
+          const dx = event.clientX - drag.startX
+          const dy = event.clientY - drag.startY
+          if (!drag.moved) {
+            if (Math.abs(dx) + Math.abs(dy) < 4) return
+            drag.moved = true
+            setDragging(true)
+          }
+          setPos(clamp(drag.originLeft + dx, drag.originTop + dy))
         }
-      }, [])
 
-      const refresh = React.useCallback(async () => {
-        setRefreshing(true)
-        try {
-          const response = await fetch(REFRESH_URL, { cache: 'no-store', credentials: 'same-origin' })
-          if (!response.ok) throw new Error('http ' + response.status)
-          const payload = await response.json()
-          setData(payload)
-          setFailed(false)
-        } catch {
-          setFailed(true)
-        } finally {
-          setRefreshing(false)
+        const finishPointer = (event) => {
+          const drag = dragState.current
+          if (!drag || drag.pointerId !== event.pointerId) return
+          dragState.current = null
+          setDragging(false)
+          try {
+            event.currentTarget.releasePointerCapture(event.pointerId)
+          } catch {
+            // Already released.
+          }
+          if (drag.moved) {
+            setPos((current) => {
+              if (current) {
+                try {
+                  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(current))
+                } catch {
+                  // Position simply is not remembered.
+                }
+              }
+              return current
+            })
+          } else {
+            setOpen((value) => !value)
+          }
         }
-      }, [])
 
-      const code = failed ? 'offline' : data?.error
-      const message = errorText(code, t)
-      const balance = data ? fmtMoney(data.balanceCents) : '—'
-      const spend = data ? fmtMoney(data.spentCents) : '—'
-      const totalTokens = data
-        ? (data.tokens?.input ?? 0) + (data.tokens?.cacheRead ?? 0) + (data.tokens?.output ?? 0)
-        : 0
-      const hasData = Boolean(data)
-
-      const onKeyDown = (event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault()
-          setOpen((value) => !value)
+        const cancelPointer = (event) => {
+          const drag = dragState.current
+          if (!drag || drag.pointerId !== event.pointerId) return
+          dragState.current = null
+          setDragging(false)
         }
-      }
 
-      return h('div', { className: 'dsu-root' },
-        h('style', null, CSS),
-        h('div', {
-          className: 'dsu-card',
-          role: 'button',
-          tabIndex: 0,
-          'aria-expanded': open,
-          'aria-label': open ? t('collapse') : t('expand'),
-          title: hasData ? t('detailHint') : undefined,
-          onClick: () => setOpen((value) => !value),
-          onKeyDown,
-        },
-          h('div', { className: 'dsu-row' },
-            h('span', { className: 'dsu-amount' }, balance),
-            h('span', { className: 'dsu-sep' }, '·'),
-            h('span', { className: 'dsu-sub' }, `${t('today')} ${spend}`),
-            h('span', { className: 'dsu-sep' }, '·'),
-            h('span', { className: 'dsu-sub' }, `${fmtTokens(totalTokens)} tok`),
-            h('span', { className: 'dsu-caret' }, open ? '▾' : '▴'),
+        const code = failed ? 'offline' : data?.error
+        const message = errorText(code, t)
+        const balance = data ? fmtMoney(data.balanceCents) : '—'
+        const spend = data ? fmtMoney(data.spentCents) : '—'
+        const totalTokens = data
+          ? (data.tokens?.input ?? 0) + (data.tokens?.cacheRead ?? 0) + (data.tokens?.output ?? 0)
+          : 0
+        const hasData = Boolean(data)
+
+        const onKeyDown = (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            setOpen((value) => !value)
+          }
+        }
+
+        const rootStyle = pos
+          ? { left: pos.left + 'px', top: pos.top + 'px', right: 'auto', bottom: 'auto' }
+          : undefined
+
+        return h('div', { className: 'dsu-root', style: rootStyle },
+          h('style', null, CSS),
+          h('div', {
+            ref: cardRef,
+            className: dragging ? 'dsu-card dsu-dragging' : 'dsu-card',
+            role: 'button',
+            tabIndex: 0,
+            'aria-expanded': open,
+            'aria-label': open ? t('collapse') : t('expand'),
+            title: t('dragHint'),
+            onPointerDown,
+            onPointerMove,
+            onPointerUp: finishPointer,
+            onPointerCancel: cancelPointer,
+            onKeyDown,
+          },
+            h('div', { className: 'dsu-row' },
+              h('span', { className: 'dsu-amount' }, balance),
+              h('span', { className: 'dsu-sep' }, '·'),
+              h('span', { className: 'dsu-sub' }, `${t('today')} ${spend}`),
+              h('span', { className: 'dsu-sep' }, '·'),
+              h('span', { className: 'dsu-sub' }, `${fmtTokens(totalTokens)} tok`),
+              h('span', { className: 'dsu-caret' }, open ? '▾' : '▴'),
+            ),
+            message ? h('div', { className: 'dsu-err' }, message) : null,
+            open
+              ? h('div', { className: 'dsu-detail' },
+                  h(Line, { label: t('total'), value: balance }),
+                  h(Line, { label: t('granted'), value: data ? fmtMoney(data.grantedCents) : '—' }),
+                  h(Line, { label: t('toppedUp'), value: data ? fmtMoney(data.toppedUpCents) : '—' }),
+                  h(Line, { label: t('spendToday'), value: spend }),
+                  h(Line, { label: t('input'), value: data ? fmtTokens(data.tokens?.input ?? 0) : '0' }),
+                  h(Line, { label: t('cacheRead'), value: data ? fmtTokens(data.tokens?.cacheRead ?? 0) : '0' }),
+                  h(Line, { label: t('output'), value: data ? fmtTokens(data.tokens?.output ?? 0) : '0' }),
+                  h('div', { className: 'dsu-foot' },
+                    h('span', { className: 'dsu-muted' },
+                      `${t('updated')} ${hasData ? fmtTime(data.balanceFetchedAt) : '—'}`),
+                    h('button', {
+                      type: 'button',
+                      className: 'dsu-btn',
+                      disabled: refreshing,
+                      onPointerDown: (event) => event.stopPropagation(),
+                      onClick: (event) => {
+                        event.stopPropagation()
+                        void refresh()
+                      },
+                    }, refreshing ? t('loading') : t('refresh'))))
+              : null,
           ),
-          message ? h('div', { className: 'dsu-err' }, message) : null,
-          open
-            ? h('div', { className: 'dsu-detail' },
-                h(Line, { label: t('total'), value: balance }),
-                h(Line, { label: t('granted'), value: data ? fmtMoney(data.grantedCents) : '—' }),
-                h(Line, { label: t('toppedUp'), value: data ? fmtMoney(data.toppedUpCents) : '—' }),
-                h(Line, { label: t('spendToday'), value: spend }),
-                h(Line, { label: t('input'), value: data ? fmtTokens(data.tokens?.input ?? 0) : '0' }),
-                h(Line, { label: t('cacheRead'), value: data ? fmtTokens(data.tokens?.cacheRead ?? 0) : '0' }),
-                h(Line, { label: t('output'), value: data ? fmtTokens(data.tokens?.output ?? 0) : '0' }),
-                h('div', { className: 'dsu-foot' },
-                  h('span', { className: 'dsu-muted' },
-                    `${t('updated')} ${hasData ? fmtTime(data.balanceFetchedAt) : '—'}`),
-                  h('button', {
-                    type: 'button',
-                    className: 'dsu-btn',
-                    disabled: refreshing,
-                    onClick: (event) => {
-                      event.stopPropagation()
-                      void refresh()
-                    },
-                  }, refreshing ? t('loading') : t('refresh'))))
-            : null,
-        ),
-      )
+        )
       }
     }
 
