@@ -1,23 +1,32 @@
 # DeepSeek 余额与用量（DSH 插件）
 
-在 DSH 窗口右下角常驻一张可拖动的状态小卡，实时显示：
+给 [DeepSeek Harness](https://github.com/deepseek-ai)（DSH）桌面端/Web 端加一张常驻状态小卡，实时显示你的 DeepSeek 余额和用量。
+
+在窗口右下角常驻一张可拖动的状态小卡，实时显示：
 
 - **余额**：DeepSeek 账户当前可用余额（¥）
 - **今日花费**：按余额差值计算，充值/赠金到账不会被误算消费
 - **今日 Token**：本机 Harness 发出的 DeepSeek 调用的 token 累计
 
-点一下卡片展开明细：总余额 / 赠金 / 充值余额 / 今日花费 / 输入（未命中缓存）/ 缓存命中 / 输出 / 上次刷新时间 / 手动刷新按钮。再点一下收起。
+点一下卡片展开明细：总余额 / 赠金 / 充值余额 / 今日花费 / 输入（未命中缓存）/ 缓存命中 / 输出 / 上次刷新时间 / 手动刷新按钮。再点一下收起。卡片可以拖到任意位置，位置会记住。
+
+> 设计说明与实现取舍见 [DESIGN.md](./DESIGN.md)。
 
 ## 安装
 
 ```bash
-# 在 DSH 会话里让 Agent 执行：
-plugin_manager install_bundle target=/绝对路径/到/dsh-deepseek-usage
+# 1. 克隆到本地任意目录
+git clone https://github.com/Echo-Tian1/dsh-deepseek-usage.git
 ```
 
-或直接交给 Agent：「安装 /Users/echo/Downloads/插件/dsh-deepseek-usage 这个插件」。
+```bash
+# 2. 在 DSH 会话里让 Agent 执行（target 换成你克隆下来的绝对路径）：
+plugin_manager install_bundle target=/你的路径/dsh-deepseek-usage
+```
 
-安装后立即生效，重启 DSH 仍然保留。插件写入当前 profile 的 `node_modules`（软链到本目录），修改本目录里的文件后，下一次 profile 重算会自动重新加载。
+也可以直接对 Agent 说：「安装 `/你的路径/dsh-deepseek-usage` 这个插件」。
+
+安装后立即生效，重启 DSH 仍然保留。插件以软链方式装进当前 profile 的 `node_modules`，后续 `git pull` 更新文件后，下一次 profile 重算会自动重新加载。
 
 ## 数据来源
 
